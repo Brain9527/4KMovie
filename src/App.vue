@@ -13,7 +13,7 @@ const fuse = ref(null)
 const loadExcel = async () => {
   loading.value = true
   try {
-    const response = await fetch('/data/movies.xls')
+    const response = await fetch(`${import.meta.env.BASE_URL}data/movies.xls`)
     const arrayBuffer = await response.arrayBuffer()
     const data = new Uint8Array(arrayBuffer)
     const workbook = XLSX.read(data, { type: 'array' })
