@@ -9,6 +9,7 @@ const movies = ref([])
 const searchQuery = ref('')
 const loading = ref(false)
 const fuse = ref(null)
+const qualityFilter = ref('全部') // 新增画质筛选状态
 
 // 分页状态
 const currentPage = ref(1)
@@ -41,8 +42,48 @@ const loadExcel = async () => {
     // 处理数据，确保获取完整的磁力链接
     movies.value = jsonData.filter(item => item && typeof item === 'object').map((item, index) => {
       let magnet = getVal(item, '磁力')
+      let chineseName = getVal(item, '中文名')
       const name = getVal(item, '电影名')
       
+      // --- 增强型 Fallback 逻辑 ---
+      // 如果“磁力”为空，尝试根据单元格位置直接取值 (C列=中文名, D列=磁力)
+      try {
+        const rowIdx = index + 1 // 跳过标题行
+        
+        // 尝试从 D 列 (索引3) 获取磁力
+        if (!magnet || !magnet.startsWith('magnet:')) {
+          const magnetCellAddr = XLSX.utils.encode_cell({ r: rowIdx, c: 3 })
+          const magnetCell = worksheet[magnetCellAddr]
+          if (magnetCell) {
+            // 优先取超链接目标，其次取单元格显示值
+            magnet = (magnetCell.l && magnetCell.l.Target) ? magnetCell.l.Target : String(magnetCell.v || '')
+          }
+        }
+
+        // 尝试从 C 列 (索引2) 获取中文名
+        if (!chineseName) {
+          const chineseCellAddr = XLSX.utils.encode_cell({ r: rowIdx, c: 2 })
+          const chineseCell = worksheet[chineseCellAddr]
+          if (chineseCell) {
+            chineseName = String(chineseCell.v || '')
+          }
+        }
+
+        // 如果还是没拿到磁力，最后尝试检查一下当前行的所有单元格，看哪个像磁力链接
+        if (!magnet || !magnet.startsWith('magnet:')) {
+          for (let c = 0; c < 10; c++) { // 检查前10列
+            const addr = XLSX.utils.encode_cell({ r: rowIdx, c })
+            const cell = worksheet[addr]
+            if (cell && cell.v && String(cell.v).startsWith('magnet:')) {
+              magnet = String(cell.v)
+              break
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('Fallback extraction failed for row', index, e)
+      }
+
       // 识别画质逻辑
       let quality = 'Unknown'
       if (name) {
@@ -72,8 +113,8 @@ const loadExcel = async () => {
 
       return {
         name,
-        chineseName: getVal(item, '中文名'),
-        magnet,
+        chineseName,
+        magnet: magnet.trim(),
         quality,
         expanded: false // 默认不展开
       }
@@ -96,11 +137,23 @@ const loadExcel = async () => {
 
 // 搜索结果
 const searchResults = computed(() => {
-  if (!searchQuery.value) {
-    return movies.value
+  let results = movies.value
+
+  // 1. 先进行模糊搜索
+  if (searchQuery.value && fuse.value) {
+    results = fuse.value.search(searchQuery.value).map(result => result.item)
   }
-  if (!fuse.value) return []
-  return fuse.value.search(searchQuery.value).map(result => result.item)
+
+  // 2. 再进行画质筛选
+  if (qualityFilter.value !== '全部') {
+    if (qualityFilter.value === '其他') {
+      results = results.filter(m => m.quality !== '4K' && m.quality !== '1080P')
+    } else {
+      results = results.filter(m => m.quality === qualityFilter.value)
+    }
+  }
+
+  return results
 })
 
 // 分页后的结果
@@ -109,6 +162,11 @@ const paginatedResults = computed(() => {
   const end = start + pageSize.value
   return searchResults.value.slice(start, end)
 })
+
+// 站外搜索跳转 (直接跳转)
+const goToExternalSearch = () => {
+  window.open('http://buerchen.top/daily', '_blank')
+}
 
 // 当搜索关键词变化时，重置页码
 const handleSearchChange = () => {
@@ -180,73 +238,155 @@ onMounted(() => {
         </template>
 
         <div class="search-box">
-          <el-input
-            v-model="searchQuery"
-            placeholder="请输入电影名称或中文名..."
-            clearable
-            size="large"
-            :prefix-icon="'Search'"
-            @input="handleSearchChange"
-          >
-            <template #prefix>
-              <el-icon><Search /></el-icon>
-            </template>
-          </el-input>
+        <el-input
+          v-model="searchQuery"
+          placeholder="请输入电影名称或中文名..."
+          clearable
+          size="large"
+          :prefix-icon="'Search'"
+          @input="handleSearchChange"
+          @keyup.enter="handleSearchChange"
+          class="internal-search"
+        >
+          <template #prefix>
+            <el-icon><Search /></el-icon>
+          </template>
+          <template #append>
+            <el-button @click="handleSearchChange">
+              搜索站内
+            </el-button>
+          </template>
+        </el-input>
+        
+        <el-button 
+          type="warning" 
+          size="large" 
+          @click="goToExternalSearch" 
+          icon="Share"
+          class="external-btn"
+        >
+          站外搜索
+        </el-button>
+      </div>
+
+        <div class="filter-box">
+          <el-radio-group v-model="qualityFilter" @change="handleSearchChange" size="small">
+            <el-radio-button label="全部" value="全部" />
+            <el-radio-button label="4K" value="4K" />
+            <el-radio-button label="1080P" value="1080P" />
+            <el-radio-button label="其他" value="其他" />
+          </el-radio-group>
         </div>
 
-        <el-table 
-          v-loading="loading"
-          :data="paginatedResults" 
-          style="width: 100%; margin-top: 20px"
-          stripe
-          border
-          class="movie-table"
-        >
-          <el-table-column prop="name" label="电影名" min-width="180" show-overflow-tooltip />
-          <el-table-column label="画质" width="100">
-            <template #default="scope">
+        <!-- PC端 表格布局 (大屏幕显示) -->
+        <div class="pc-layout">
+          <el-table 
+            v-loading="loading"
+            :data="paginatedResults" 
+            style="width: 100%; margin-top: 20px"
+            stripe
+            border
+            class="movie-table"
+          >
+            <el-table-column prop="name" label="电影名" min-width="180" show-overflow-tooltip />
+            <el-table-column label="画质" width="100">
+              <template #default="scope">
+                <el-tag 
+                  :type="scope.row.quality === '4K' ? 'danger' : (scope.row.quality === '1080P' ? 'success' : 'info')"
+                  effect="dark"
+                  size="small"
+                >
+                  {{ scope.row.quality }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="chineseName" label="中文名" min-width="150" />
+            <el-table-column label="磁力链接" min-width="300">
+              <template #default="scope">
+                <div class="magnet-container">
+                  <div 
+                    :class="['magnet-wrapper', { 'is-expanded': scope.row.expanded }]"
+                    @click="toggleExpand(scope.row)"
+                    title="点击展开/收起完整链接"
+                  >
+                    <el-text class="magnet-text-display">
+                      <span class="protocol">magnet:</span>{{ scope.row.expanded ? scope.row.magnet.replace('magnet:', '') : truncateMagnet(scope.row.magnet).replace('magnet:', '') }}
+                    </el-text>
+                    <el-icon class="expand-icon">
+                      <ArrowDown v-if="!scope.row.expanded" />
+                      <ArrowUp v-else />
+                    </el-icon>
+                  </div>
+                  <el-button 
+                    type="primary" 
+                    size="small" 
+                    @click.stop="copyMagnet(scope.row.magnet)"
+                    icon="DocumentCopy"
+                    class="copy-btn"
+                  >
+                    复制
+                  </el-button>
+                </div>
+              </template>
+            </el-table-column>
+            <template #empty>
+              <el-empty description="没有找到相关电影" />
+            </template>
+          </el-table>
+        </div>
+
+        <!-- 移动端 卡片布局 (手机/iPad显示) -->
+        <div v-loading="loading" class="mobile-layout movie-list">
+          <div v-for="(movie, index) in paginatedResults" :key="index" class="movie-card-item">
+            <div class="card-header">
+              <div class="title-section">
+                <h3 class="movie-title">{{ movie.chineseName || '未知中文名' }}</h3>
+                <span class="movie-name-en">{{ movie.name }}</span>
+              </div>
               <el-tag 
-                :type="scope.row.quality === '4K' ? 'danger' : (scope.row.quality === '1080P' ? 'success' : 'info')"
+                :type="movie.quality === '4K' ? 'danger' : (movie.quality === '1080P' ? 'success' : 'info')"
                 effect="dark"
                 size="small"
+                class="quality-tag"
               >
-                {{ scope.row.quality }}
+                {{ movie.quality }}
               </el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column prop="chineseName" label="中文名" min-width="150" />
-          <el-table-column label="磁力链接" min-width="300">
-            <template #default="scope">
-              <div class="magnet-container">
-                <div 
-                  :class="['magnet-wrapper', { 'is-expanded': scope.row.expanded }]"
-                  @click="toggleExpand(scope.row)"
-                  title="点击展开/收起完整链接"
-                >
-                  <el-text class="magnet-text-display">
-                    <span class="protocol">magnet:</span>{{ scope.row.expanded ? scope.row.magnet.replace('magnet:', '') : truncateMagnet(scope.row.magnet).replace('magnet:', '') }}
-                  </el-text>
+            </div>
+
+            <div class="card-content">
+              <div 
+                :class="['magnet-wrapper', { 'is-expanded': movie.expanded }]"
+                @click="toggleExpand(movie)"
+              >
+                <div class="magnet-header">
+                  <span class="magnet-label">磁力链接</span>
                   <el-icon class="expand-icon">
-                    <ArrowDown v-if="!scope.row.expanded" />
+                    <ArrowDown v-if="!movie.expanded" />
                     <ArrowUp v-else />
                   </el-icon>
                 </div>
-                <el-button 
-                  type="primary" 
-                  size="small" 
-                  @click.stop="copyMagnet(scope.row.magnet)"
-                  icon="DocumentCopy"
-                  class="copy-btn"
-                >
-                  复制
-                </el-button>
+                <el-text class="magnet-text-display">
+                  <span class="protocol">magnet:</span>{{ movie.expanded ? movie.magnet.replace('magnet:', '') : truncateMagnet(movie.magnet).replace('magnet:', '') }}
+                </el-text>
               </div>
-            </template>
-          </el-table-column>
-          <template #empty>
-            <el-empty description="没有找到相关电影" />
-          </template>
-        </el-table>
+            </div>
+
+            <div class="card-footer">
+              <el-button 
+                type="primary" 
+                size="default" 
+                @click.stop="copyMagnet(movie.magnet)"
+                icon="DocumentCopy"
+                class="mobile-copy-btn"
+                round
+              >
+                复制完整链接
+              </el-button>
+            </div>
+          </div>
+
+          <el-empty v-if="paginatedResults.length === 0" description="没有找到相关电影" />
+        </div>
 
         <div class="pagination-container">
           <el-pagination
@@ -265,75 +405,134 @@ onMounted(() => {
 
 <style scoped>
 .container {
-  max-width: 1000px;
-  margin: 40px auto;
-  padding: 0 20px;
+  max-width: 800px;
+  margin: 20px auto;
+  padding: 0 10px;
 }
 
 .search-card {
-  border-radius: 12px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  border-radius: 16px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+  border: none;
 }
 
-.header {
-  text-align: center;
+:deep(.el-card__header) {
+  padding: 15px 20px;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+:deep(.el-card__body) {
+  padding: 15px;
 }
 
 .header h2 {
   margin: 0;
   color: #409eff;
+  font-size: 1.5rem;
 }
 
 .subtitle {
   color: #909399;
-  font-size: 14px;
-  margin-top: 8px;
+  font-size: 12px;
+  margin-top: 5px;
 }
 
 .search-box {
-  margin-bottom: 25px;
-  display: flex;
-  justify-content: center;
-}
-
-.search-box .el-input {
-  max-width: 600px;
-  box-shadow: 0 2px 8px rgba(64, 158, 255, 0.1);
-}
-
-.movie-table {
-  border-radius: 8px;
-  overflow: hidden;
-}
-
-.pagination-container {
-  margin-top: 30px;
-  display: flex;
-  justify-content: center;
-}
-
-.magnet-container {
+  margin-bottom: 20px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 8px 0;
+  gap: 12px;
+}
+
+.internal-search {
+  width: 100%;
+  max-width: none;
+}
+
+.external-btn {
+  width: 100%;
+  margin-left: 0 !important;
+}
+
+/* 移动端卡片列表样式 */
+.movie-list {
+  margin-top: 10px;
+}
+
+.movie-card-item {
+  background: #fff;
+  border: 1px solid #f0f0f0;
+  border-radius: 12px;
+  padding: 15px;
+  margin-bottom: 15px;
+  transition: all 0.3s ease;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.02);
+}
+
+.movie-card-item:hover {
+  box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+  border-color: #409eff44;
+}
+
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 12px;
+}
+
+.title-section {
+  flex: 1;
+  padding-right: 10px;
+}
+
+.movie-title {
+  margin: 0;
+  font-size: 16px;
+  color: #303133;
+  line-height: 1.4;
+}
+
+.movie-name-en {
+  display: block;
+  font-size: 12px;
+  color: #909399;
+  margin-top: 4px;
+  word-break: break-all;
+}
+
+.quality-tag {
+  flex-shrink: 0;
+}
+
+.card-content {
+  margin-bottom: 15px;
 }
 
 .magnet-wrapper {
   cursor: pointer;
-  background-color: #fcfcfc;
-  padding: 10px;
-  border-radius: 6px;
-  border: 1px solid #e4e7ed;
+  background-color: #f8f9fa;
+  padding: 12px;
+  border-radius: 8px;
+  border: 1px solid #eee;
   transition: all 0.2s;
+}
+
+.magnet-header {
   display: flex;
   justify-content: space-between;
-  align-items: flex-start;
-  gap: 10px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.magnet-label {
+  font-size: 12px;
+  font-weight: bold;
+  color: #606266;
 }
 
 .magnet-wrapper:hover {
-  background-color: #f5f7fa;
+  background-color: #f0f7ff;
   border-color: #409eff;
 }
 
@@ -347,28 +546,77 @@ onMounted(() => {
   font-size: 12px;
   word-break: break-all;
   white-space: pre-wrap;
-  line-height: 1.4;
+  line-height: 1.5;
   color: #444;
-  flex: 1;
+  display: block;
 }
 
-.expand-icon {
-  margin-top: 2px;
-  color: #909399;
-  font-size: 14px;
+.protocol {
+  color: #409eff;
+  font-weight: bold;
 }
 
-.copy-btn {
-  align-self: flex-start;
-  transition: all 0.3s;
+.card-footer {
+  display: flex;
+  justify-content: flex-end;
 }
 
-.copy-btn:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 2px 6px rgba(64, 158, 255, 0.3);
+.mobile-copy-btn {
+  width: 100%;
 }
 
-:deep(.el-table__header) {
-  background-color: #f5f7fa;
+.filter-box {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 20px;
+  overflow-x: auto;
+  padding-bottom: 5px;
+}
+
+/* 布局显隐控制 */
+.pc-layout {
+  display: none;
+}
+
+.mobile-layout {
+  display: block;
+}
+
+/* 响应式媒体查询 */
+@media (min-width: 992px) {
+  .pc-layout {
+    display: block;
+  }
+  
+  .mobile-layout {
+    display: none;
+  }
+
+  .container {
+    padding: 0 20px;
+    margin: 40px auto;
+    max-width: 1000px; /* PC端调宽一点 */
+  }
+  
+  .search-box {
+    flex-direction: row;
+    gap: 15px;
+  }
+  
+  .internal-search {
+    flex: 1;
+  }
+  
+  .external-btn {
+    width: auto;
+  }
+  
+  .movie-title {
+    font-size: 18px;
+  }
+  
+  .mobile-copy-btn {
+    width: auto;
+  }
 }
 </style>
