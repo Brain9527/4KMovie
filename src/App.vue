@@ -14,6 +14,8 @@ const qualityFilter = ref('全部') // 新增画质筛选状态
 // 分页状态
 const currentPage = ref(1)
 const pageSize = ref(10)
+const displayLimitMobile = ref(10) // 移动端初始加载数量
+const noMoreMobile = computed(() => displayLimitMobile.value >= searchResults.value.length)
 
 // 加载 Excel 文件
 const loadExcel = async () => {
@@ -156,11 +158,16 @@ const searchResults = computed(() => {
   return results
 })
 
-// 分页后的结果
+// 分页后的结果 (PC端使用)
 const paginatedResults = computed(() => {
   const start = (currentPage.value - 1) * pageSize.value
   const end = start + pageSize.value
   return searchResults.value.slice(start, end)
+})
+
+// 移动端滚动加载的结果
+const mobileResults = computed(() => {
+  return searchResults.value.slice(0, displayLimitMobile.value)
 })
 
 // 站外搜索跳转 (直接跳转)
@@ -168,9 +175,16 @@ const goToExternalSearch = () => {
   window.open('http://buerchen.top/daily', '_blank')
 }
 
-// 当搜索关键词变化时，重置页码
+// 当搜索关键词变化时，重置页码和移动端加载限制
 const handleSearchChange = () => {
   currentPage.value = 1
+  displayLimitMobile.value = 10
+}
+
+// 移动端加载更多
+const loadMoreMobile = () => {
+  if (loading.value || noMoreMobile.value) return
+  displayLimitMobile.value += 10
 }
 
 const toggleExpand = (row) => {
@@ -333,11 +347,28 @@ onMounted(() => {
               <el-empty description="没有找到相关电影" />
             </template>
           </el-table>
+
+          <div class="pagination-container">
+            <el-pagination
+              v-model:current-page="currentPage"
+              v-model:page-size="pageSize"
+              :page-sizes="[10, 20, 50, 100]"
+              layout="total, sizes, prev, pager, next, jumper"
+              :total="searchResults.length"
+              background
+            />
+          </div>
         </div>
 
         <!-- 移动端 卡片布局 (手机/iPad显示) -->
-        <div v-loading="loading" class="mobile-layout movie-list">
-          <div v-for="(movie, index) in paginatedResults" :key="index" class="movie-card-item">
+        <div 
+          v-loading="loading" 
+          class="mobile-layout movie-list"
+          v-infinite-scroll="loadMoreMobile"
+          :infinite-scroll-disabled="noMoreMobile || loading"
+          :infinite-scroll-distance="20"
+        >
+          <div v-for="(movie, index) in mobileResults" :key="index" class="movie-card-item">
             <div class="card-header">
               <div class="title-section">
                 <h3 class="movie-title">{{ movie.chineseName || '未知中文名' }}</h3>
@@ -385,18 +416,13 @@ onMounted(() => {
             </div>
           </div>
 
-          <el-empty v-if="paginatedResults.length === 0" description="没有找到相关电影" />
-        </div>
+          <div v-if="mobileResults.length > 0" class="infinite-status">
+            <p v-if="loading">加载中...</p>
+            <p v-else-if="noMoreMobile" class="no-more-text">没有更多电影了</p>
+            <p v-else class="scroll-tip">继续下滑加载更多</p>
+          </div>
 
-        <div class="pagination-container">
-          <el-pagination
-            v-model:current-page="currentPage"
-            v-model:page-size="pageSize"
-            :page-sizes="[10, 20, 50, 100]"
-            layout="total, sizes, prev, pager, next, jumper"
-            :total="searchResults.length"
-            background
-          />
+          <el-empty v-if="mobileResults.length === 0" description="没有找到相关电影" />
         </div>
       </el-card>
     </div>
@@ -454,10 +480,36 @@ onMounted(() => {
   margin-left: 0 !important;
 }
 
-/* 移动端卡片列表样式 */
-.movie-list {
+/* 移动端列表及无限滚动样式 */
+.mobile-layout.movie-list {
   margin-top: 10px;
+  height: calc(100vh - 280px); /* 减去搜索框和头部的高度 */
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch; /* iOS 滚动优化 */
 }
+
+.infinite-status {
+  text-align: center;
+  padding: 20px 0;
+  color: #909399;
+  font-size: 13px;
+}
+
+.no-more-text {
+  position: relative;
+}
+
+.no-more-text::before, .no-more-text::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  width: 30px;
+  height: 1px;
+  background: #e4e7ed;
+}
+
+.no-more-text::before { left: 20%; }
+.no-more-text::after { right: 20%; }
 
 .movie-card-item {
   background: #fff;
